@@ -223,6 +223,11 @@ impl App {
     }
 
     fn apply_op(&mut self, done: OpDone) {
+        if done.status.is_some() {
+            if matches!(self.modal, Modal::Commit(_)) {
+                self.modal = Modal::None;
+            }
+        }
         if let Some(snap) = done.status {
             let prev = self.rows.get(self.cursor).map(|r| r.path.clone());
             self.entries = snap.entries;
@@ -1052,12 +1057,12 @@ impl App {
             });
             return Ok(());
         }
-        self.modal = Modal::None;
         self.do_commit_with(ci);
         Ok(())
     }
 
     fn do_commit_with(&mut self, ci: CommitInput) {
+        self.modal = Modal::Commit(ci.clone());
         let subject = ci.subject;
         let amend = ci.amend;
         self.start("committing", move || {

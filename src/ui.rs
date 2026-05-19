@@ -574,6 +574,20 @@ fn render_commit_modal(f: &mut Frame, app: &App, area: Rect) {
         width: rect.width.saturating_sub(2),
         height: rect.height.saturating_sub(2),
     };
+
+    if app.pending.is_some() {
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let elapsed = app.pending.as_ref().map(|p| p.started.elapsed()).unwrap_or_default();
+        let idx = ((elapsed.as_millis() / 80) as usize) % frames.len();
+        let line = Line::from(vec![
+            Span::styled(frames[idx], Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled("committing…", Style::default().fg(Color::White)),
+        ]);
+        f.render_widget(Paragraph::new(line), inner);
+        return;
+    }
+
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(3)])
