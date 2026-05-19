@@ -151,6 +151,7 @@ fn render_log_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -535,6 +536,27 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn centered_rect_abs(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let height = height.min(r.height);
+    let top = r.height.saturating_sub(height) / 2;
+    let vert = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vert[1])[1]
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -556,7 +578,9 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 fn render_commit_modal(f: &mut Frame, app: &App, area: Rect) {
     let Modal::Commit(ci) = &app.modal else { return };
-    let rect = centered_rect(70, 25, area);
+
+    // 2 border + 1 subject label + 3 input
+    let rect = centered_rect_abs(70, 7, area);
     f.render_widget(Clear, rect);
 
     let (git_n, lfs_n) = app.staged_counts();
@@ -593,17 +617,17 @@ fn render_commit_modal(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(1), Constraint::Length(3)])
         .split(inner);
 
-    let label = Line::from(Span::styled(
-        "Subject",
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ));
-    f.render_widget(Paragraph::new(label), rows[0]);
-    let subj_block = Block::default().borders(Borders::ALL);
-    let subj_text = format!("{}_", ci.subject);
     f.render_widget(
-        Paragraph::new(subj_text)
+        Paragraph::new(Line::from(Span::styled(
+            "Subject",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!("{}_", ci.subject))
             .style(Style::default().fg(Color::White))
-            .block(subj_block),
+            .block(Block::default().borders(Borders::ALL)),
         rows[1],
     );
 }
