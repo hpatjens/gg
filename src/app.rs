@@ -896,21 +896,47 @@ impl App {
                 self.modal = Modal::None;
                 match c.kind {
                     ConfirmKind::Restore { path, is_dir } => {
-                        let p = path.clone();
-                        let toast_msg = format!(
-                            "restored {}{}",
-                            if is_dir { "folder " } else { "" },
-                            path
-                        );
-                        self.start(format!("restoring {}", p), move || {
-                            git::restore_worktree(&p)?;
-                            let snap = gather_status()?;
-                            Ok(OpDone {
-                                toast: Some(toast_msg),
-                                status: Some(snap),
-                                ..Default::default()
-                            })
-                        });
+                        if is_dir {
+                            let prefix = format!("{}/", path);
+                            let mut restore_paths: Vec<String> = Vec::new();
+                            let mut delete_paths: Vec<String> = Vec::new();
+                            for e in &self.entries {
+                                if e.path.starts_with(&prefix) {
+                                    if e.index == crate::git::Stage::Untracked {
+                                        delete_paths.push(e.path.clone());
+                                    } else if e.worktree.is_changed() {
+                                        restore_paths.push(e.path.clone());
+                                    }
+                                }
+                            }
+                            let toast_msg = format!("restored folder {}", path);
+                            self.start(format!("restoring {}", path), move || {
+                                for p in &restore_paths {
+                                    git::restore_worktree(p)?;
+                                }
+                                for p in &delete_paths {
+                                    git::delete_untracked(p)?;
+                                }
+                                let snap = gather_status()?;
+                                Ok(OpDone {
+                                    toast: Some(toast_msg),
+                                    status: Some(snap),
+                                    ..Default::default()
+                                })
+                            });
+                        } else {
+                            let p = path.clone();
+                            let toast_msg = format!("restored {}", path);
+                            self.start(format!("restoring {}", p), move || {
+                                git::restore_worktree(&p)?;
+                                let snap = gather_status()?;
+                                Ok(OpDone {
+                                    toast: Some(toast_msg),
+                                    status: Some(snap),
+                                    ..Default::default()
+                                })
+                            });
+                        }
                     }
                     ConfirmKind::DeleteUntracked { path } => {
                         let p = path.clone();
