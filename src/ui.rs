@@ -3,7 +3,7 @@ use crate::git::{FileEntry, Stage, StorageMode};
 use crate::tree::Row;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
@@ -87,7 +87,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             spans.push(Span::raw(format!("  [{} commits]", app.log.commits.len())));
         }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Right), area);
 }
 
 fn render_main(f: &mut Frame, app: &App, area: Rect) {
@@ -400,18 +400,30 @@ fn render_files(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = app
         .rows
         .iter()
-        .map(|r| {
-            let entry = r.entry_index.and_then(|i| app.entries.get(i));
+        .enumerate()
+        .map(|(i, r)| {
+            let entry = r.entry_index.and_then(|idx| app.entries.get(idx));
             let item = ListItem::new(row_line(r, entry));
+            let selected = i == app.cursor;
             let mixed = r.agg.unstaged > 0 || r.agg.untracked > 0;
             let bg = if r.agg.staged > 0 {
                 if r.is_dir {
-                    if mixed { None } else { Some(Color::Rgb(20, 45, 25)) }
+                    if mixed {
+                        if selected { Some(Color::DarkGray) } else { None }
+                    } else if selected {
+                        Some(Color::Rgb(40, 90, 50))
+                    } else {
+                        Some(Color::Rgb(20, 45, 25))
+                    }
                 } else if mixed {
-                    Some(Color::Rgb(55, 45, 15))
+                    if selected { Some(Color::Rgb(90, 75, 25)) } else { Some(Color::Rgb(55, 45, 15)) }
+                } else if selected {
+                    Some(Color::Rgb(40, 90, 50))
                 } else {
                     Some(Color::Rgb(20, 45, 25))
                 }
+            } else if selected {
+                Some(Color::DarkGray)
             } else {
                 None
             };
@@ -423,7 +435,7 @@ fn render_files(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
     let mut state = ListState::default();
     state.select(Some(app.cursor));
