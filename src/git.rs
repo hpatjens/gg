@@ -479,6 +479,117 @@ pub fn stash_drop(reference: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct LocalBranch {
+    pub name: String,
+    pub is_head: bool,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub gone: bool,
+    pub short: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteBranch {
+    pub remote: String,
+    pub name: String,
+    pub short: String,
+    pub subject: String,
+}
+
+pub fn local_branches() -> Result<Vec<LocalBranch>> {
+    let fmt = "%(HEAD)\x1f%(refname:short)\x1f%(upstream:short)\x1f%(upstream:track)\x1f%(objectname:short)\x1f%(contents:subject)";
+    let arg = format!("--format={}", fmt);
+    let s = run(&["for-each-ref", "--sort=-committerdate", "refs/heads", &arg])?;
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let parts: Vec<&str> = line.splitn(6, '\x1f').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let (ahead, behind, gone) = parse_track(parts[3]);
+        out.push(LocalBranch {
+            is_head: parts[0].trim() == "*",
+            name: parts[1].to_string(),
+            upstream: if parts[2].is_empty() { None } else { Some(parts[2].to_string()) },
+            ahead,
+            behind,
+            gone,
+            short: parts[4].to_string(),
+            subject: parts[5].to_string(),
+        });
+    }
+    Ok(out)
+}
+
+fn parse_track(s: &str) -> (usize, usize, bool) {
+    let s = s.trim();
+    if s.is_empty() {
+        return (0, 0, false);
+    }
+    let inner = s.trim_start_matches('[').trim_end_matches(']');
+    if inner.contains("gone") {
+        return (0, 0, true);
+    }
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
+    for part in inner.split(',') {
+        let p = part.trim();
+        if let Some(rest) = p.strip_prefix("ahead ") {
+            ahead = rest.parse().unwrap_or(0);
+        } else if let Some(rest) = p.strip_prefix("behind ") {
+            behind = rest.parse().unwrap_or(0);
+        }
+    }
+    (ahead, behind, false)
+}
+
+pub fn remote_branches() -> Result<Vec<RemoteBranch>> {
+    let fmt = "%(refname:short)\x1f%(objectname:short)\x1f%(contents:subject)";
+    let arg = format!("--format={}", fmt);
+    let s = run(&["for-each-ref", "--sort=refname", "refs/remotes", &arg])?;
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\x1f').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let refname = parts[0];
+        if refname.ends_with("/HEAD") {
+            continue;
+        }
+        let (remote, name) = match refname.split_once('/') {
+            Some((r, n)) => (r.to_string(), n.to_string()),
+            None => continue,
+        };
+        out.push(RemoteBranch {
+            remote,
+            name,
+            short: parts[1].to_string(),
+            subject: parts[2].to_string(),
+        });
+    }
+    Ok(out)
+}
+
+pub fn checkout_branch(name: &str) -> Result<()> {
+    run(&["checkout", name])?;
+    Ok(())
+}
+
+pub fn branch_create(name: &str) -> Result<()> {
+    run(&["branch", name])?;
+    Ok(())
+}
+
+pub fn branch_delete(name: &str, force: bool) -> Result<()> {
+    let flag = if force { "-D" } else { "-d" };
+    run(&["branch", flag, name])?;
+    Ok(())
+}
+
 pub fn push(remote: &str, branch: &str, set_upstream: bool) -> Result<String> {
     let mut args: Vec<&str> = vec!["push"];
     if set_upstream {

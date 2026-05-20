@@ -1,4 +1,4 @@
-use crate::app::{App, Focus, LogFocus, Modal, PushDialog, StashFocus, Tab};
+use crate::app::{App, BranchFocus, Focus, LogFocus, Modal, PushDialog, StashFocus, Tab};
 use crate::git::{FileEntry, Stage, StorageMode};
 use crate::tree::Row;
 use ratatui::{
@@ -28,6 +28,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Tab::Status => render_main(f, app, chunks[2]),
         Tab::Stash => render_stash(f, app, chunks[2]),
         Tab::Log => render_log(f, app, chunks[2]),
+        Tab::Branches => render_branches(f, app, chunks[2]),
     }
     render_footer(f, app, chunks[3]);
 
@@ -36,6 +37,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Modal::Commit(_) => render_commit_modal(f, app, area),
         Modal::Push(d) => render_push_modal(f, d, area),
         Modal::Confirm(c) => render_confirm_modal(f, c, area),
+        Modal::NewBranch(_) => render_new_branch_modal(f, app, area),
     }
 }
 
@@ -44,11 +46,13 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
         Line::from("[1] Status"),
         Line::from("[2] Stash"),
         Line::from("[3] Log"),
+        Line::from("[4] Branches"),
     ];
     let selected = match app.tab {
         Tab::Status => 0,
         Tab::Stash => 1,
         Tab::Log => 2,
+        Tab::Branches => 3,
     };
     let tabs = Tabs::new(titles)
         .block(
@@ -85,6 +89,13 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         }
         Tab::Log => {
             spans.push(Span::raw(format!("  [{} commits]", app.log.commits.len())));
+        }
+        Tab::Branches => {
+            spans.push(Span::raw(format!(
+                "  [{} local, {} remote]",
+                app.branches.locals.len(),
+                app.branches.remotes.len()
+            )));
         }
     }
     f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Right), area);
@@ -159,6 +170,181 @@ fn truncate(s: &str, n: usize) -> String {
         let cut: String = s.chars().take(n.saturating_sub(1)).collect();
         format!("{}…", cut)
     }
+}
+
+fn render_branches(f: &mut Frame, app: &App, area: Rect) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    render_local_branches(f, app, cols[0]);
+    render_remote_branches(f, app, cols[1]);
+}
+
+fn render_local_branches(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.branches.focus == BranchFocus::Local;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Local ({}) ", app.branches.locals.len()))
+        .border_style(border_style);
+
+    if app.branches.locals.is_empty() {
+        f.render_widget(Paragraph::new("(no local branches)").block(block), area);
+        return;
+    }
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let items: Vec<ListItem> = app
+        .branches
+        .locals
+        .iter()
+        .map(|b| {
+            let head_marker = if b.is_head { "* " } else { "  " };
+            let head_style = if b.is_head {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                dim
+            };
+            let name_style = if b.is_head {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let mut spans = vec![
+                Span::styled(head_marker, head_style),
+                Span::styled(b.name.clone(), name_style),
+            ];
+            if let Some(up) = &b.upstream {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(format!("→ {}", up), dim));
+            }
+            if b.gone {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("[gone]", Style::default().fg(Color::Red)));
+            } else if b.ahead > 0 || b.behind > 0 {
+                spans.push(Span::raw(" "));
+                if b.ahead > 0 {
+                    spans.push(Span::styled(
+                        format!("↑{}", b.ahead),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+                if b.behind > 0 {
+                    if b.ahead > 0 {
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.push(Span::styled(
+                        format!("↓{}", b.behind),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+            }
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(b.short.clone(), Style::default().fg(Color::Yellow)));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                truncate(&b.subject, 60),
+                Style::default().fg(Color::White),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(Some(app.branches.local_cursor));
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_remote_branches(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.branches.focus == BranchFocus::Remote;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Remote ({}) ", app.branches.remotes.len()))
+        .border_style(border_style);
+
+    if app.branches.remotes.is_empty() {
+        f.render_widget(Paragraph::new("(no remote branches)").block(block), area);
+        return;
+    }
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let header_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut header_indices: Vec<usize> = Vec::new();
+    let mut last_remote: Option<String> = None;
+    for b in &app.branches.remotes {
+        let new_group = match &last_remote {
+            Some(r) => r != &b.remote,
+            None => true,
+        };
+        if new_group {
+            header_indices.push(items.len());
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!("{}/", b.remote),
+                header_style,
+            ))));
+            last_remote = Some(b.remote.clone());
+        }
+        let line = Line::from(vec![
+            Span::styled("  ", dim),
+            Span::styled(b.name.clone(), Style::default().fg(Color::White)),
+            Span::raw("  "),
+            Span::styled(b.short.clone(), Style::default().fg(Color::Yellow)),
+            Span::raw(" "),
+            Span::styled(truncate(&b.subject, 60), dim),
+        ]);
+        items.push(ListItem::new(line));
+    }
+
+    let cursor_index = remote_visual_index(&app, &header_indices);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(cursor_index);
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn remote_visual_index(app: &App, header_indices: &[usize]) -> Option<usize> {
+    if app.branches.remotes.is_empty() {
+        return None;
+    }
+    let cursor = app.branches.remote_cursor.min(app.branches.remotes.len() - 1);
+    let target_remote = &app.branches.remotes[cursor].remote;
+    let mut row = 0usize;
+    let mut last_remote: Option<&str> = None;
+    let _ = header_indices;
+    for (i, b) in app.branches.remotes.iter().enumerate() {
+        let new_group = match last_remote {
+            Some(r) => r != b.remote,
+            None => true,
+        };
+        if new_group {
+            row += 1;
+            last_remote = Some(&b.remote);
+        }
+        if i == cursor {
+            let _ = target_remote;
+            return Some(row);
+        }
+        row += 1;
+    }
+    None
 }
 
 fn render_stash(f: &mut Frame, app: &App, area: Rect) {
@@ -518,17 +704,19 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         (Modal::Push(_), _) => " y/Enter confirm  ↑↓ pick  Esc cancel",
         (Modal::Confirm(_), _) => " y confirm  n/Esc cancel",
         (Modal::None, Tab::Status) => match app.focus {
-            Focus::Files => " 1/2/3 tab  ↑↓ nav  →/← expand/collapse  Tab diff  Space stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
-            Focus::Diff => " 1/2/3 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  r refresh  q quit",
+            Focus::Files => " 1/2/3/4 tab  ↑↓ nav  →/← expand/collapse  Tab diff  Space stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
+            Focus::Diff => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  r refresh  q quit",
         },
         (Modal::None, Tab::Stash) => match app.stash.focus {
-            StashFocus::List => " 1/2/3 tab  ↑↓ nav  Home/End  Enter/→ details  a apply  p pop  d drop  r refresh  q quit",
-            StashFocus::Details => " 1/2/3 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  q quit",
+            StashFocus::List => " 1/2/3/4 tab  ↑↓ nav  Home/End  Enter/→ details  a apply  p pop  d drop  r refresh  q quit",
+            StashFocus::Details => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  q quit",
         },
         (Modal::None, Tab::Log) => match app.log.focus {
-            LogFocus::List => " 1/2/3 tab  ↑↓ nav  Home/End  Enter/→ details  r refresh  q quit",
-            LogFocus::Details => " 1/2/3 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  q quit",
+            LogFocus::List => " 1/2/3/4 tab  ↑↓ nav  Home/End  Enter/→ details  r refresh  q quit",
+            LogFocus::Details => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  q quit",
         },
+        (Modal::None, Tab::Branches) => " 1/2/3/4 tab  ↑↓ nav  Tab/←→ pane  Enter checkout  n new  d delete  D force  r refresh  q quit",
+        (Modal::NewBranch(_), _) => " Enter create  Esc cancel",
     };
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(hints, Style::default().fg(Color::DarkGray)))),
@@ -676,6 +864,44 @@ fn render_push_modal(f: &mut Frame, d: &PushDialog, area: Rect) {
             f.render_widget(Paragraph::new("  Pushing…"), inner);
         }
     }
+}
+
+fn render_new_branch_modal(f: &mut Frame, app: &App, area: Rect) {
+    let Modal::NewBranch(ni) = &app.modal else { return };
+    let rect = centered_rect_abs(60, 7, area);
+    f.render_widget(Clear, rect);
+    let title = " New branch (from HEAD) ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(block, rect);
+
+    let inner = Rect {
+        x: rect.x + 1,
+        y: rect.y + 1,
+        width: rect.width.saturating_sub(2),
+        height: rect.height.saturating_sub(2),
+    };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(3)])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Name",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+    f.render_widget(
+        Paragraph::new(format!("{}_", ni.name))
+            .style(Style::default().fg(Color::White))
+            .block(Block::default().borders(Borders::ALL)),
+        rows[1],
+    );
 }
 
 fn render_confirm_modal(f: &mut Frame, c: &crate::app::ConfirmDialog, area: Rect) {

@@ -1,4 +1,4 @@
-use crate::git::{self, Commit, FileEntry, Stash};
+use crate::git::{self, Commit, FileEntry, LocalBranch, RemoteBranch, Stash};
 use crate::tree::{self, Row};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -20,6 +20,13 @@ pub struct OpDone {
     pub status: Option<StatusSnapshot>,
     pub log: Option<Vec<Commit>>,
     pub stashes: Option<Vec<Stash>>,
+    pub branches: Option<BranchesSnapshot>,
+}
+
+#[derive(Debug)]
+pub struct BranchesSnapshot {
+    pub locals: Vec<LocalBranch>,
+    pub remotes: Vec<RemoteBranch>,
 }
 
 pub struct Pending {
@@ -41,6 +48,29 @@ pub enum Tab {
     Status,
     Stash,
     Log,
+    Branches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchFocus {
+    Local,
+    Remote,
+}
+
+impl Default for BranchFocus {
+    fn default() -> Self {
+        BranchFocus::Local
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct BranchesState {
+    pub locals: Vec<LocalBranch>,
+    pub remotes: Vec<RemoteBranch>,
+    pub local_cursor: usize,
+    pub remote_cursor: usize,
+    pub focus: BranchFocus,
+    pub loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +161,18 @@ pub enum ConfirmKind {
     CommitDespiteLfs { pending: CommitInput },
     StashPop { reference: String },
     StashDrop { reference: String },
+    BranchDelete { name: String, force: bool },
+}
+
+#[derive(Debug, Clone)]
+pub struct NewBranchInput {
+    pub name: String,
+}
+
+impl NewBranchInput {
+    pub fn new() -> Self {
+        Self { name: String::new() }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +181,7 @@ pub enum Modal {
     Commit(CommitInput),
     Push(PushDialog),
     Confirm(ConfirmDialog),
+    NewBranch(NewBranchInput),
 }
 
 pub struct App {
@@ -152,6 +195,7 @@ pub struct App {
     pub diff_scroll: u16,
     pub log: LogState,
     pub stash: StashState,
+    pub branches: BranchesState,
     pub modal: Modal,
     pub status_line: Option<(String, Instant)>,
     pub branch: String,
@@ -173,6 +217,7 @@ impl App {
             diff_scroll: 0,
             log: LogState::default(),
             stash: StashState::default(),
+            branches: BranchesState::default(),
             modal: Modal::None,
             status_line: None,
             branch: String::new(),
@@ -243,6 +288,7 @@ impl App {
             }
             self.refresh_diff();
             self.log.loaded = false;
+            self.branches.loaded = false;
         }
         if let Some(commits) = done.log {
             self.log.commits = commits;
@@ -259,6 +305,17 @@ impl App {
                 self.stash.cursor = self.stash.stashes.len().saturating_sub(1);
             }
             self.refresh_stash_details();
+        }
+        if let Some(snap) = done.branches {
+            self.branches.locals = snap.locals;
+            self.branches.remotes = snap.remotes;
+            self.branches.loaded = true;
+            if self.branches.local_cursor >= self.branches.locals.len() {
+                self.branches.local_cursor = self.branches.locals.len().saturating_sub(1);
+            }
+            if self.branches.remote_cursor >= self.branches.remotes.len() {
+                self.branches.remote_cursor = self.branches.remotes.len().saturating_sub(1);
+            }
         }
         if let Some(t) = done.toast {
             self.toast(t);
@@ -286,6 +343,7 @@ impl App {
         self.upstream = git::upstream().unwrap_or(None);
         self.refresh_diff();
         self.log.loaded = false;
+        self.branches.loaded = false;
         Ok(())
     }
 
@@ -350,7 +408,7 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.pending.is_some() {
             if key.code == KeyCode::Char('q')
-                && !matches!(self.modal, Modal::Commit(_))
+                && !matches!(self.modal, Modal::Commit(_) | Modal::NewBranch(_))
             {
                 self.quit = true;
             }
@@ -371,17 +429,23 @@ impl App {
                         self.switch_tab(Tab::Log);
                         return Ok(());
                     }
+                    (KeyCode::Char('4'), _) => {
+                        self.switch_tab(Tab::Branches);
+                        return Ok(());
+                    }
                     _ => {}
                 }
                 match self.tab {
                     Tab::Status => self.handle_main(key)?,
                     Tab::Stash => self.handle_stash(key)?,
                     Tab::Log => self.handle_log(key)?,
+                    Tab::Branches => self.handle_branches(key)?,
                 }
             }
             Modal::Commit(_) => self.handle_commit(key)?,
             Modal::Push(_) => self.handle_push_modal(key)?,
             Modal::Confirm(_) => self.handle_confirm(key)?,
+            Modal::NewBranch(_) => self.handle_new_branch(key)?,
         }
         Ok(())
     }
@@ -425,7 +489,198 @@ impl App {
                     self.refresh_log();
                 }
             }
+            Tab::Branches => {
+                if !self.branches.loaded {
+                    self.refresh_branches();
+                }
+            }
         }
+    }
+
+    pub fn refresh_branches(&mut self) {
+        self.start("fetching branches", || {
+            let locals = git::local_branches().unwrap_or_default();
+            let remotes = git::remote_branches().unwrap_or_default();
+            Ok(OpDone {
+                branches: Some(BranchesSnapshot { locals, remotes }),
+                ..Default::default()
+            })
+        });
+    }
+
+    fn handle_branches(&mut self, key: KeyEvent) -> Result<()> {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _) => self.quit = true,
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+                self.branches.focus = match self.branches.focus {
+                    BranchFocus::Local => BranchFocus::Remote,
+                    BranchFocus::Remote => BranchFocus::Local,
+                };
+            }
+            (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
+                self.branches.focus = BranchFocus::Local;
+            }
+            (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
+                self.branches.focus = BranchFocus::Remote;
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.branch_cursor_up(),
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.branch_cursor_down(),
+            (KeyCode::Home, _) => self.branch_cursor_home(),
+            (KeyCode::End, _) => self.branch_cursor_end(),
+            (KeyCode::Enter, _) => self.start_checkout(),
+            (KeyCode::Char('d'), _) => self.start_branch_delete(false),
+            (KeyCode::Char('D'), _) => self.start_branch_delete(true),
+            (KeyCode::Char('n'), _) => {
+                self.modal = Modal::NewBranch(NewBranchInput::new());
+            }
+            (KeyCode::Char('r'), _) => self.refresh_branches(),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn branch_cursor_up(&mut self) {
+        match self.branches.focus {
+            BranchFocus::Local => {
+                if self.branches.local_cursor > 0 {
+                    self.branches.local_cursor -= 1;
+                }
+            }
+            BranchFocus::Remote => {
+                if self.branches.remote_cursor > 0 {
+                    self.branches.remote_cursor -= 1;
+                }
+            }
+        }
+    }
+
+    fn branch_cursor_down(&mut self) {
+        match self.branches.focus {
+            BranchFocus::Local => {
+                if self.branches.local_cursor + 1 < self.branches.locals.len() {
+                    self.branches.local_cursor += 1;
+                }
+            }
+            BranchFocus::Remote => {
+                if self.branches.remote_cursor + 1 < self.branches.remotes.len() {
+                    self.branches.remote_cursor += 1;
+                }
+            }
+        }
+    }
+
+    fn branch_cursor_home(&mut self) {
+        match self.branches.focus {
+            BranchFocus::Local => self.branches.local_cursor = 0,
+            BranchFocus::Remote => self.branches.remote_cursor = 0,
+        }
+    }
+
+    fn branch_cursor_end(&mut self) {
+        match self.branches.focus {
+            BranchFocus::Local => {
+                self.branches.local_cursor = self.branches.locals.len().saturating_sub(1);
+            }
+            BranchFocus::Remote => {
+                self.branches.remote_cursor = self.branches.remotes.len().saturating_sub(1);
+            }
+        }
+    }
+
+    fn start_checkout(&mut self) {
+        let target = match self.branches.focus {
+            BranchFocus::Local => self
+                .branches
+                .locals
+                .get(self.branches.local_cursor)
+                .map(|b| b.name.clone()),
+            BranchFocus::Remote => self
+                .branches
+                .remotes
+                .get(self.branches.remote_cursor)
+                .map(|b| b.name.clone()),
+        };
+        let Some(name) = target else { return };
+        let n = name.clone();
+        let toast_msg = format!("checked out {}", name);
+        self.start(format!("checking out {}", n), move || {
+            git::checkout_branch(&n)?;
+            let snap = gather_status()?;
+            let locals = git::local_branches().unwrap_or_default();
+            let remotes = git::remote_branches().unwrap_or_default();
+            Ok(OpDone {
+                toast: Some(toast_msg),
+                status: Some(snap),
+                branches: Some(BranchesSnapshot { locals, remotes }),
+                ..Default::default()
+            })
+        });
+    }
+
+    fn start_branch_delete(&mut self, force: bool) {
+        if self.branches.focus != BranchFocus::Local {
+            self.toast("delete only for local branches");
+            return;
+        }
+        let Some(b) = self.branches.locals.get(self.branches.local_cursor).cloned() else { return };
+        if b.is_head {
+            self.toast("cannot delete current branch");
+            return;
+        }
+        let title = if force { "Force-delete branch?" } else { "Delete branch?" };
+        let message = if force {
+            format!("Force-delete '{}' (git branch -D)? Unmerged work will be lost. [y/N]", b.name)
+        } else {
+            format!("Delete branch '{}'? [y/N]", b.name)
+        };
+        self.modal = Modal::Confirm(ConfirmDialog {
+            title: title.into(),
+            message,
+            kind: ConfirmKind::BranchDelete { name: b.name, force },
+        });
+    }
+
+    fn handle_new_branch(&mut self, key: KeyEvent) -> Result<()> {
+        let Modal::NewBranch(mut ni) = self.modal.clone() else { return Ok(()) };
+        match key.code {
+            KeyCode::Esc => {
+                self.modal = Modal::None;
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                let name = ni.name.trim().to_string();
+                if name.is_empty() {
+                    self.toast("branch name required");
+                    self.modal = Modal::NewBranch(ni);
+                    return Ok(());
+                }
+                self.modal = Modal::None;
+                let n = name.clone();
+                let toast_msg = format!("created {}", name);
+                self.start(format!("creating {}", n), move || {
+                    git::branch_create(&n)?;
+                    let locals = git::local_branches().unwrap_or_default();
+                    let remotes = git::remote_branches().unwrap_or_default();
+                    Ok(OpDone {
+                        toast: Some(toast_msg),
+                        branches: Some(BranchesSnapshot { locals, remotes }),
+                        ..Default::default()
+                    })
+                });
+                return Ok(());
+            }
+            KeyCode::Backspace => {
+                ni.name.pop();
+            }
+            KeyCode::Char(c) => {
+                if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                    ni.name.push(c);
+                }
+            }
+            _ => {}
+        }
+        self.modal = Modal::NewBranch(ni);
+        Ok(())
     }
 
     pub fn refresh_stash(&mut self) {
@@ -983,6 +1238,20 @@ impl App {
                             Ok(OpDone {
                                 toast: Some(toast_msg),
                                 stashes: Some(stashes),
+                                ..Default::default()
+                            })
+                        });
+                    }
+                    ConfirmKind::BranchDelete { name, force } => {
+                        let n = name.clone();
+                        let toast_msg = format!("deleted {}", name);
+                        self.start(format!("deleting {}", n), move || {
+                            git::branch_delete(&n, force)?;
+                            let locals = git::local_branches().unwrap_or_default();
+                            let remotes = git::remote_branches().unwrap_or_default();
+                            Ok(OpDone {
+                                toast: Some(toast_msg),
+                                branches: Some(BranchesSnapshot { locals, remotes }),
                                 ..Default::default()
                             })
                         });
