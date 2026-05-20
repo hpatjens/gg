@@ -80,6 +80,13 @@ pub enum Focus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffView {
+    Hidden,
+    Split,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFocus {
     List,
     Details,
@@ -191,6 +198,7 @@ pub struct App {
     pub cursor: usize,
     pub collapsed: HashSet<String>,
     pub focus: Focus,
+    pub diff_view: DiffView,
     pub diff_text: String,
     pub diff_scroll: u16,
     pub log: LogState,
@@ -213,6 +221,7 @@ impl App {
             cursor: 0,
             collapsed: HashSet::new(),
             focus: Focus::Files,
+            diff_view: DiffView::Hidden,
             diff_text: String::new(),
             diff_scroll: 0,
             log: LogState::default(),
@@ -476,6 +485,8 @@ impl App {
         match new_tab {
             Tab::Status => {
                 self.cursor = 0;
+                self.diff_view = DiffView::Hidden;
+                self.focus = Focus::Files;
                 self.rebuild_rows();
                 self.refresh_diff();
             }
@@ -942,7 +953,7 @@ impl App {
             }
             (KeyCode::Tab, _) => {
                 if !self.rows.is_empty() {
-                    self.focus = Focus::Diff;
+                    self.open_diff();
                 }
             }
             (KeyCode::Right, _) | (KeyCode::Char('l'), _) => self.right_action(),
@@ -989,8 +1000,20 @@ impl App {
             self.rebuild_rows();
             self.clamp_cursor();
         } else {
-            self.focus = Focus::Diff;
+            self.open_diff();
         }
+    }
+
+    fn open_diff(&mut self) {
+        if self.diff_view == DiffView::Hidden {
+            self.diff_view = DiffView::Split;
+        }
+        self.focus = Focus::Diff;
+    }
+
+    fn close_diff(&mut self) {
+        self.diff_view = DiffView::Hidden;
+        self.focus = Focus::Files;
     }
 
     fn left_action(&mut self) {
@@ -1023,7 +1046,7 @@ impl App {
             self.rebuild_rows();
             self.clamp_cursor();
         } else {
-            self.focus = Focus::Diff;
+            self.open_diff();
         }
     }
 
@@ -1039,8 +1062,14 @@ impl App {
     fn handle_diff(&mut self, key: KeyEvent) -> Result<()> {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) => self.quit = true,
-            (KeyCode::Esc, _) | (KeyCode::Left, _) => self.focus = Focus::Files,
-            (KeyCode::BackTab, _) | (KeyCode::Tab, _) => self.focus = Focus::Files,
+            (KeyCode::Esc, _) | (KeyCode::Left, _) => self.close_diff(),
+            (KeyCode::BackTab, _) | (KeyCode::Tab, _) => self.close_diff(),
+            (KeyCode::Enter, _) => {
+                self.diff_view = match self.diff_view {
+                    DiffView::Full => DiffView::Split,
+                    _ => DiffView::Full,
+                };
+            }
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
                 self.diff_scroll = self.diff_scroll.saturating_sub(1);
             }

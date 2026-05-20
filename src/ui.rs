@@ -1,4 +1,4 @@
-use crate::app::{App, BranchFocus, Focus, LogFocus, Modal, PushDialog, StashFocus, Tab};
+use crate::app::{App, BranchFocus, DiffView, Focus, LogFocus, Modal, PushDialog, StashFocus, Tab};
 use crate::git::{FileEntry, Stage, StorageMode};
 use crate::tree::Row;
 use ratatui::{
@@ -102,12 +102,18 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_main(f: &mut Frame, app: &App, area: Rect) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    render_files(f, app, cols[0]);
-    render_diff(f, app, cols[1]);
+    match app.diff_view {
+        DiffView::Hidden => render_files(f, app, area),
+        DiffView::Full => render_diff(f, app, area),
+        DiffView::Split => {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            render_files(f, app, cols[0]);
+            render_diff(f, app, cols[1]);
+        }
+    }
 }
 
 fn render_log(f: &mut Frame, app: &App, area: Rect) {
@@ -704,8 +710,11 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         (Modal::Push(_), _) => " y/Enter confirm  ↑↓ pick  Esc cancel",
         (Modal::Confirm(_), _) => " y confirm  n/Esc cancel",
         (Modal::None, Tab::Status) => match app.focus {
-            Focus::Files => " 1/2/3/4 tab  ↑↓ nav  →/← expand/collapse  Tab diff  Space stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
-            Focus::Diff => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Esc back  r refresh  q quit",
+            Focus::Files => " 1/2/3/4 tab  ↑↓ nav  →/← expand/collapse  Tab/Enter diff  Space stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
+            Focus::Diff => match app.diff_view {
+                DiffView::Full => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter shrink  ←/Esc close  r refresh  q quit",
+                _ => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter fullscreen  ←/Esc close  r refresh  q quit",
+            },
         },
         (Modal::None, Tab::Stash) => match app.stash.focus {
             StashFocus::List => " 1/2/3/4 tab  ↑↓ nav  Home/End  Enter/→ details  a apply  p pop  d drop  r refresh  q quit",
