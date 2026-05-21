@@ -710,7 +710,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         (Modal::Push(_), _) => " y/Enter confirm  ↑↓ pick  Esc cancel",
         (Modal::Confirm(_), _) => " y confirm  n/Esc cancel",
         (Modal::None, Tab::Status) => match app.focus {
-            Focus::Files => " 1/2/3/4 tab  ↑↓ nav  →/← expand/collapse  Tab/Enter diff  Space stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
+            Focus::Files => " 1/2/3/4 tab  ↑↓ nav  →/← expand/collapse  Tab/Space diff  Enter stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
             Focus::Diff => match app.diff_view {
                 DiffView::Full => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter shrink  ←/Esc close  r refresh  q quit",
                 _ => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter fullscreen  ←/Esc close  r refresh  q quit",

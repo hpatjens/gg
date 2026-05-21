@@ -958,8 +958,8 @@ impl App {
             }
             (KeyCode::Right, _) | (KeyCode::Char('l'), _) => self.right_action(),
             (KeyCode::Left, _) | (KeyCode::Char('h'), _) => self.left_action(),
-            (KeyCode::Enter, _) => self.enter_action(),
-            (KeyCode::Char(' '), _) => self.toggle_stage(),
+            (KeyCode::Char(' '), _) => self.enter_action(),
+            (KeyCode::Enter, _) => self.toggle_stage(),
             (KeyCode::Char('a'), _) => {
                 self.start("staging all", || {
                     git::stage_all()?;
@@ -1004,10 +1004,14 @@ impl App {
         }
     }
 
-    fn open_diff(&mut self) {
+    fn show_diff_panel(&mut self) {
         if self.diff_view == DiffView::Hidden {
             self.diff_view = DiffView::Split;
         }
+    }
+
+    fn open_diff(&mut self) {
+        self.show_diff_panel();
         self.focus = Focus::Diff;
     }
 
@@ -1045,8 +1049,10 @@ impl App {
             }
             self.rebuild_rows();
             self.clamp_cursor();
+        } else if self.diff_view == DiffView::Hidden {
+            self.show_diff_panel();
         } else {
-            self.open_diff();
+            self.close_diff();
         }
     }
 
