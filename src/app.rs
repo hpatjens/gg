@@ -681,7 +681,11 @@ impl App {
                 return Ok(());
             }
             KeyCode::Backspace => {
-                ni.name.pop();
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    pop_word(&mut ni.name);
+                } else {
+                    ni.name.pop();
+                }
             }
             KeyCode::Char(c) => {
                 if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1320,6 +1324,9 @@ impl App {
                 self.submit_commit()?;
                 return Ok(());
             }
+            (KeyCode::Backspace, true) => {
+                pop_word(&mut ci.subject);
+            }
             (KeyCode::Backspace, _) => {
                 ci.subject.pop();
             }
@@ -1476,5 +1483,14 @@ fn parent_path(p: &str) -> String {
     match p.rfind('/') {
         Some(i) => p[..i].to_string(),
         None => String::new(),
+    }
+}
+
+fn pop_word(s: &mut String) {
+    while matches!(s.chars().last(), Some(c) if c.is_whitespace()) {
+        s.pop();
+    }
+    while matches!(s.chars().last(), Some(c) if !c.is_whitespace()) {
+        s.pop();
     }
 }
