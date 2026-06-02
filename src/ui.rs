@@ -703,12 +703,12 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         (Modal::Confirm(_), _) => " y confirm  n/Esc cancel",
         (Modal::None, Tab::Status) => match app.focus {
             Focus::Files => match app.status_pane {
-                StatusPane::Unstaged => " 1/2/3/4 tab  ↑↓ nav  Tab staged  →/← expand/collapse  Space/→ diff  Enter stage  a all  d discard  c commit  P push  r refresh  q quit",
-                StatusPane::Staged => " 1/2/3/4 tab  ↑↓ nav  Tab unstaged  →/← expand/collapse  Space/→ diff  Enter unstage  c commit  P push  r refresh  q quit",
+                StatusPane::Unstaged => " 1/2/3/4 tab  ↑↓ nav  Tab staged  →/← expand/collapse  Space preview  → open  Enter stage  a all  d discard  c commit  P push  r refresh  q quit",
+                StatusPane::Staged => " 1/2/3/4 tab  ↑↓ nav  Tab unstaged  →/← expand/collapse  Space preview  → open  Enter unstage  c commit  P push  r refresh  q quit",
             },
             Focus::Diff => match app.diff_view {
-                DiffView::Full => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter shrink  ←/Esc close  r refresh  q quit",
-                _ => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter fullscreen  ←/Esc close  r refresh  q quit",
+                DiffView::Full => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  ←/Enter shrink  Space close  r refresh  q quit",
+                _ => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  →/Enter fullscreen  ← back  Space close  r refresh  q quit",
             },
         },
         (Modal::None, Tab::Stash) => match app.stash.focus {

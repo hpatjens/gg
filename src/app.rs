@@ -1165,9 +1165,24 @@ impl App {
         self.focus = Focus::Diff;
     }
 
-    fn close_diff(&mut self) {
-        self.diff_view = DiffView::Hidden;
-        self.focus = Focus::Files;
+    /// Space: global on/off switch for the preview pane, usable from either pane.
+    fn toggle_preview(&mut self) {
+        if self.diff_view == DiffView::Hidden {
+            self.diff_view = DiffView::Split;
+        } else {
+            self.diff_view = DiffView::Hidden;
+            self.focus = Focus::Files;
+        }
+    }
+
+    /// Left/Esc inside the preview: fullscreen → split (stay in preview),
+    /// split → back to the file tree with the pane left open.
+    fn diff_back(&mut self) {
+        if self.diff_view == DiffView::Full {
+            self.diff_view = DiffView::Split;
+        } else {
+            self.focus = Focus::Files;
+        }
     }
 
     fn left_action(&mut self) {
@@ -1200,10 +1215,8 @@ impl App {
             }
             self.rebuild_rows();
             self.clamp_cursor();
-        } else if self.diff_view == DiffView::Hidden {
-            self.show_diff_panel();
         } else {
-            self.close_diff();
+            self.toggle_preview();
         }
     }
 
@@ -1221,8 +1234,10 @@ impl App {
     fn handle_diff(&mut self, key: KeyEvent) -> Result<()> {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) => self.quit = true,
-            (KeyCode::Esc, _) | (KeyCode::Left, _) => self.close_diff(),
-            (KeyCode::BackTab, _) | (KeyCode::Tab, _) => self.close_diff(),
+            (KeyCode::Char(' '), _) => self.toggle_preview(),
+            (KeyCode::Esc, _) | (KeyCode::Left, _) | (KeyCode::Char('h'), _) => self.diff_back(),
+            (KeyCode::BackTab, _) | (KeyCode::Tab, _) => self.diff_back(),
+            (KeyCode::Right, _) | (KeyCode::Char('l'), _) => self.diff_view = DiffView::Full,
             (KeyCode::Enter, _) => {
                 self.diff_view = match self.diff_view {
                     DiffView::Full => DiffView::Split,
