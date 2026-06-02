@@ -1,4 +1,6 @@
-use crate::app::{App, BranchFocus, DiffView, Focus, LogFocus, Modal, PushDialog, StashFocus, Tab};
+use crate::app::{
+    App, BranchFocus, DiffView, Focus, LogFocus, Modal, PushDialog, StashFocus, StatusPane, Tab,
+};
 use crate::git::{FileEntry, Stage, StorageMode};
 use crate::tree::Row;
 use ratatui::{
@@ -103,17 +105,27 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_main(f: &mut Frame, app: &App, area: Rect) {
     match app.diff_view {
-        DiffView::Hidden => render_files(f, app, area),
+        DiffView::Hidden => render_status_panes(f, app, area),
         DiffView::Full => render_diff(f, app, area),
         DiffView::Split => {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
-            render_files(f, app, cols[0]);
+            render_status_panes(f, app, cols[0]);
             render_diff(f, app, cols[1]);
         }
     }
+}
+
+/// The left region is split horizontally: unstaged files on top, staged below.
+fn render_status_panes(f: &mut Frame, app: &App, area: Rect) {
+    let halves = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    render_tree_pane(f, app, halves[0], StatusPane::Unstaged);
+    render_tree_pane(f, app, halves[1], StatusPane::Staged);
 }
 
 fn render_log(f: &mut Frame, app: &App, area: Rect) {
@@ -571,67 +583,47 @@ fn storage_badge_spans(r: &Row, entry: Option<&FileEntry>) -> Vec<Span<'static>>
     spans
 }
 
-fn render_files(f: &mut Frame, app: &App, area: Rect) {
-    let focused = matches!(app.focus, Focus::Files);
+fn render_tree_pane(f: &mut Frame, app: &App, area: Rect, pane: StatusPane) {
+    let rows = app.rows_for(pane);
+    let cursor = app.cursor_for(pane);
+    let focused = matches!(app.focus, Focus::Files) && app.status_pane == pane;
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-    let title = format!(" Files ({}) ", app.rows.len());
+    let (label, empty_msg) = match pane {
+        StatusPane::Unstaged => ("Unstaged", "clean — nothing unstaged"),
+        StatusPane::Staged => ("Staged", "nothing staged"),
+    };
+    let title = format!(" {} ({}) ", label, rows.len());
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(border_style);
 
-    if app.rows.is_empty() {
-        let p = Paragraph::new("clean — nothing to commit").block(block);
+    if rows.is_empty() {
+        let p = Paragraph::new(empty_msg).block(block);
         f.render_widget(p, area);
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .rows
+    let items: Vec<ListItem> = rows
         .iter()
-        .enumerate()
-        .map(|(i, r)| {
+        .map(|r| {
             let entry = r.entry_index.and_then(|idx| app.entries.get(idx));
-            let item = ListItem::new(row_line(r, entry));
-            let selected = i == app.cursor;
-            let mixed = r.agg.unstaged > 0 || r.agg.untracked > 0;
-            let bg = if r.agg.staged > 0 {
-                if r.is_dir {
-                    if mixed {
-                        if selected { Some(Color::DarkGray) } else { None }
-                    } else if selected {
-                        Some(Color::Rgb(40, 90, 50))
-                    } else {
-                        Some(Color::Rgb(20, 45, 25))
-                    }
-                } else if mixed {
-                    if selected { Some(Color::Rgb(90, 75, 25)) } else { Some(Color::Rgb(55, 45, 15)) }
-                } else if selected {
-                    Some(Color::Rgb(40, 90, 50))
-                } else {
-                    Some(Color::Rgb(20, 45, 25))
-                }
-            } else if selected {
-                Some(Color::DarkGray)
-            } else {
-                None
-            };
-            match bg {
-                Some(c) => item.style(Style::default().bg(c)),
-                None => item,
-            }
+            ListItem::new(row_line(r, entry))
         })
         .collect();
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
     let mut state = ListState::default();
-    state.select(Some(app.cursor));
+    // Only the focused tree shows a selection — there is one cursor at a time.
+    if focused {
+        state.select(Some(cursor));
+    }
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -710,7 +702,10 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         (Modal::Push(_), _) => " y/Enter confirm  ↑↓ pick  Esc cancel",
         (Modal::Confirm(_), _) => " y confirm  n/Esc cancel",
         (Modal::None, Tab::Status) => match app.focus {
-            Focus::Files => " 1/2/3/4 tab  ↑↓ nav  →/← expand/collapse  Tab/Space diff  Enter stage  a all  u unstage  d discard  c commit  P push  r refresh  q quit",
+            Focus::Files => match app.status_pane {
+                StatusPane::Unstaged => " 1/2/3/4 tab  ↑↓ nav  Tab staged  →/← expand/collapse  Space/→ diff  Enter stage  a all  d discard  c commit  P push  r refresh  q quit",
+                StatusPane::Staged => " 1/2/3/4 tab  ↑↓ nav  Tab unstaged  →/← expand/collapse  Space/→ diff  Enter unstage  c commit  P push  r refresh  q quit",
+            },
             Focus::Diff => match app.diff_view {
                 DiffView::Full => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter shrink  ←/Esc close  r refresh  q quit",
                 _ => " 1/2/3/4 tab  ↑↓ scroll  PgUp/PgDn  Home/End  Enter fullscreen  ←/Esc close  r refresh  q quit",

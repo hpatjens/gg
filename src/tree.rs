@@ -7,6 +7,13 @@ pub enum NodeKind {
     File,
 }
 
+/// Which half of the status view a tree represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Unstaged,
+    Staged,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Agg {
     pub staged: u32,
@@ -64,7 +71,7 @@ pub struct Row {
     pub entry_index: Option<usize>,
 }
 
-pub fn build_rows(entries: &[FileEntry], collapsed: &HashSet<String>) -> Vec<Row> {
+pub fn build_rows(entries: &[FileEntry], collapsed: &HashSet<String>, side: Side) -> Vec<Row> {
     let mut root = Node {
         name: String::new(),
         path: String::new(),
@@ -77,7 +84,14 @@ pub fn build_rows(entries: &[FileEntry], collapsed: &HashSet<String>) -> Vec<Row
         entry_index: None,
     };
     for (i, e) in entries.iter().enumerate() {
-        insert(&mut root, e, i, collapsed);
+        let keep = match side {
+            Side::Unstaged => e.in_unstaged(),
+            Side::Staged => e.in_staged(),
+        };
+        if !keep {
+            continue;
+        }
+        insert(&mut root, e, i, collapsed, side);
     }
     sort_rec(&mut root);
     aggregate(&mut root);
@@ -106,9 +120,9 @@ fn coalesce(n: &mut Node, collapsed: &HashSet<String>) {
     }
 }
 
-fn insert(parent: &mut Node, e: &FileEntry, idx: usize, collapsed: &HashSet<String>) {
+fn insert(parent: &mut Node, e: &FileEntry, idx: usize, collapsed: &HashSet<String>, side: Side) {
     let parts: Vec<&str> = e.path.split('/').collect();
-    insert_parts(parent, &parts, 0, e, idx, "", collapsed);
+    insert_parts(parent, &parts, 0, e, idx, "", collapsed, side);
 }
 
 fn insert_parts(
@@ -119,6 +133,7 @@ fn insert_parts(
     idx: usize,
     prefix: &str,
     collapsed: &HashSet<String>,
+    side: Side,
 ) {
     let name = parts[depth];
     let full = if prefix.is_empty() {
@@ -133,7 +148,7 @@ fn insert_parts(
             kind: NodeKind::File,
             children: vec![],
             expanded: false,
-            agg: file_agg(e),
+            agg: file_agg(e, side),
             lfs_tracked: e.lfs_tracked,
             lfs_pointer_warn: e.lfs_tracked && e.lfs_pointer_ok == Some(false),
             entry_index: Some(idx),
@@ -161,36 +176,39 @@ fn insert_parts(
             parent.children.len() - 1
         }
     };
-    insert_parts(&mut parent.children[cidx], parts, depth + 1, e, idx, &full, collapsed);
+    insert_parts(&mut parent.children[cidx], parts, depth + 1, e, idx, &full, collapsed, side);
 }
 
-fn file_agg(e: &FileEntry) -> Agg {
+/// Status counts for one file, reflecting only the requested side. Callers only
+/// pass entries that belong to `side` (see `in_unstaged`/`in_staged`).
+fn file_agg(e: &FileEntry, side: Side) -> Agg {
     let mut a = Agg::default();
-    if e.index == Stage::Conflicted {
-        a.conflict = 1;
-        return a;
-    }
-    if e.index == Stage::Untracked {
-        a.untracked = 1;
-        return a;
-    }
-    if e.index.is_changed() {
-        a.staged = 1;
-    }
-    if e.worktree.is_changed() && e.worktree != Stage::Untracked {
-        a.unstaged = 1;
-    }
-    match e.index {
-        Stage::Added => a.added = 1,
-        Stage::Modified => a.modified = 1,
-        Stage::Deleted => a.deleted = 1,
-        _ => {}
-    }
-    if e.index == Stage::Unmodified {
-        match e.worktree {
-            Stage::Modified => a.modified = 1,
-            Stage::Deleted => a.deleted = 1,
-            _ => {}
+    match side {
+        Side::Unstaged => {
+            if e.index == Stage::Conflicted {
+                a.conflict = 1;
+                return a;
+            }
+            if e.index == Stage::Untracked {
+                a.untracked = 1;
+                return a;
+            }
+            a.unstaged = 1;
+            match e.worktree {
+                Stage::Added => a.added = 1,
+                Stage::Modified => a.modified = 1,
+                Stage::Deleted => a.deleted = 1,
+                _ => {}
+            }
+        }
+        Side::Staged => {
+            a.staged = 1;
+            match e.index {
+                Stage::Added => a.added = 1,
+                Stage::Modified => a.modified = 1,
+                Stage::Deleted => a.deleted = 1,
+                _ => {}
+            }
         }
     }
     a

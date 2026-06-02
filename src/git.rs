@@ -61,6 +61,20 @@ impl FileEntry {
     pub fn has_staged(&self) -> bool {
         self.index.is_changed() && self.index != Stage::Untracked
     }
+
+    /// Belongs in the unstaged tree: untracked, conflicted, or has working-tree changes.
+    pub fn in_unstaged(&self) -> bool {
+        self.index == Stage::Untracked
+            || self.index == Stage::Conflicted
+            || (self.worktree.is_changed() && self.worktree != Stage::Untracked)
+    }
+
+    /// Belongs in the staged tree: has index changes (but is not merely untracked/conflicted).
+    pub fn in_staged(&self) -> bool {
+        self.index.is_changed()
+            && self.index != Stage::Untracked
+            && self.index != Stage::Conflicted
+    }
 }
 
 fn run(args: &[&str]) -> Result<String> {

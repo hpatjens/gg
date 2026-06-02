@@ -1,5 +1,5 @@
 use crate::git::{self, Commit, FileEntry, LocalBranch, RemoteBranch, Stash};
-use crate::tree::{self, Row};
+use crate::tree::{self, Row, Side};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashSet;
@@ -77,6 +77,28 @@ pub struct BranchesState {
 pub enum Focus {
     Files,
     Diff,
+}
+
+/// Which of the two stacked status trees is active when `Focus::Files`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusPane {
+    Unstaged,
+    Staged,
+}
+
+impl Default for StatusPane {
+    fn default() -> Self {
+        StatusPane::Unstaged
+    }
+}
+
+impl StatusPane {
+    pub fn side(self) -> Side {
+        match self {
+            StatusPane::Unstaged => Side::Unstaged,
+            StatusPane::Staged => Side::Staged,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,9 +216,13 @@ pub enum Modal {
 pub struct App {
     pub tab: Tab,
     pub entries: Vec<FileEntry>,
-    pub rows: Vec<Row>,
-    pub cursor: usize,
-    pub collapsed: HashSet<String>,
+    pub unstaged_rows: Vec<Row>,
+    pub staged_rows: Vec<Row>,
+    pub unstaged_cursor: usize,
+    pub staged_cursor: usize,
+    pub unstaged_collapsed: HashSet<String>,
+    pub staged_collapsed: HashSet<String>,
+    pub status_pane: StatusPane,
     pub focus: Focus,
     pub diff_view: DiffView,
     pub diff_text: String,
@@ -217,9 +243,13 @@ impl App {
         let mut app = App {
             tab: Tab::Status,
             entries: Vec::new(),
-            rows: Vec::new(),
-            cursor: 0,
-            collapsed: HashSet::new(),
+            unstaged_rows: Vec::new(),
+            staged_rows: Vec::new(),
+            unstaged_cursor: 0,
+            staged_cursor: 0,
+            unstaged_collapsed: HashSet::new(),
+            staged_collapsed: HashSet::new(),
+            status_pane: StatusPane::Unstaged,
             focus: Focus::Files,
             diff_view: DiffView::Hidden,
             diff_text: String::new(),
@@ -283,18 +313,13 @@ impl App {
             }
         }
         if let Some(snap) = done.status {
-            let prev = self.rows.get(self.cursor).map(|r| r.path.clone());
+            let prev = self.remember_cursors();
             self.entries = snap.entries;
             self.branch = snap.branch;
             self.upstream = snap.upstream;
             self.rebuild_rows();
-            if let Some(p) = prev {
-                if let Some(i) = self.rows.iter().position(|r| r.path == p) {
-                    self.cursor = i;
-                } else if self.cursor >= self.rows.len() {
-                    self.cursor = self.rows.len().saturating_sub(1);
-                }
-            }
+            self.restore_cursors(prev);
+            self.ensure_active_pane_nonempty();
             self.refresh_diff();
             self.log.loaded = false;
             self.branches.loaded = false;
@@ -332,22 +357,15 @@ impl App {
     }
 
     pub fn refresh(&mut self) -> Result<()> {
-        let prev_path = self.rows.get(self.cursor).map(|r| r.path.clone());
+        let prev = self.remember_cursors();
         let mut entries = git::status()?;
         if let Err(e) = git::annotate_lfs(&mut entries) {
             self.toast(format!("LFS annotate failed: {}", e));
         }
         self.entries = entries;
         self.rebuild_rows();
-        if let Some(p) = prev_path {
-            if let Some(i) = self.rows.iter().position(|r| r.path == p) {
-                self.cursor = i;
-            } else {
-                self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
-            }
-        } else {
-            self.cursor = 0;
-        }
+        self.restore_cursors(prev);
+        self.ensure_active_pane_nonempty();
         self.branch = git::current_branch().unwrap_or_else(|_| "(detached)".into());
         self.upstream = git::upstream().unwrap_or(None);
         self.refresh_diff();
@@ -357,14 +375,106 @@ impl App {
     }
 
     fn rebuild_rows(&mut self) {
-        self.rows = tree::build_rows(&self.entries, &self.collapsed);
+        self.unstaged_rows =
+            tree::build_rows(&self.entries, &self.unstaged_collapsed, Side::Unstaged);
+        self.staged_rows = tree::build_rows(&self.entries, &self.staged_collapsed, Side::Staged);
+    }
+
+    /// Rows of the currently focused status tree.
+    fn active_rows(&self) -> &[Row] {
+        match self.status_pane {
+            StatusPane::Unstaged => &self.unstaged_rows,
+            StatusPane::Staged => &self.staged_rows,
+        }
+    }
+
+    pub fn rows_for(&self, pane: StatusPane) -> &[Row] {
+        match pane {
+            StatusPane::Unstaged => &self.unstaged_rows,
+            StatusPane::Staged => &self.staged_rows,
+        }
+    }
+
+    fn active_cursor(&self) -> usize {
+        match self.status_pane {
+            StatusPane::Unstaged => self.unstaged_cursor,
+            StatusPane::Staged => self.staged_cursor,
+        }
+    }
+
+    pub fn cursor_for(&self, pane: StatusPane) -> usize {
+        match pane {
+            StatusPane::Unstaged => self.unstaged_cursor,
+            StatusPane::Staged => self.staged_cursor,
+        }
+    }
+
+    fn set_active_cursor(&mut self, c: usize) {
+        match self.status_pane {
+            StatusPane::Unstaged => self.unstaged_cursor = c,
+            StatusPane::Staged => self.staged_cursor = c,
+        }
+    }
+
+    fn active_collapsed(&mut self) -> &mut HashSet<String> {
+        match self.status_pane {
+            StatusPane::Unstaged => &mut self.unstaged_collapsed,
+            StatusPane::Staged => &mut self.staged_collapsed,
+        }
+    }
+
+    /// Capture the focused path in each tree so the cursor can follow it across a rebuild.
+    fn remember_cursors(&self) -> (Option<String>, Option<String>) {
+        (
+            self.unstaged_rows
+                .get(self.unstaged_cursor)
+                .map(|r| r.path.clone()),
+            self.staged_rows
+                .get(self.staged_cursor)
+                .map(|r| r.path.clone()),
+        )
+    }
+
+    /// If the focused tree is now empty but the other has rows, follow the rows.
+    fn ensure_active_pane_nonempty(&mut self) {
+        if !self.active_rows().is_empty() {
+            return;
+        }
+        let other = match self.status_pane {
+            StatusPane::Unstaged => StatusPane::Staged,
+            StatusPane::Staged => StatusPane::Unstaged,
+        };
+        if !self.rows_for(other).is_empty() {
+            self.status_pane = other;
+        }
+    }
+
+    fn restore_cursors(&mut self, prev: (Option<String>, Option<String>)) {
+        if let Some(p) = prev.0 {
+            if let Some(i) = self.unstaged_rows.iter().position(|r| r.path == p) {
+                self.unstaged_cursor = i;
+            }
+        }
+        if self.unstaged_cursor >= self.unstaged_rows.len() {
+            self.unstaged_cursor = self.unstaged_rows.len().saturating_sub(1);
+        }
+        if let Some(p) = prev.1 {
+            if let Some(i) = self.staged_rows.iter().position(|r| r.path == p) {
+                self.staged_cursor = i;
+            }
+        }
+        if self.staged_cursor >= self.staged_rows.len() {
+            self.staged_cursor = self.staged_rows.len().saturating_sub(1);
+        }
     }
 
     pub fn refresh_diff(&mut self) {
         self.diff_scroll = 0;
-        self.diff_text = match self.rows.get(self.cursor) {
+        let side = self.status_pane.side();
+        let row = self.active_rows().get(self.active_cursor()).cloned();
+        self.diff_text = match row {
             Some(r) if !r.is_dir => match r.entry_index.and_then(|i| self.entries.get(i)) {
-                Some(e) => self.compute_diff(e),
+                Some(e) => self.compute_diff(e, side),
                 None => String::new(),
             },
             Some(r) => {
@@ -375,10 +485,18 @@ impl App {
         };
     }
 
-    fn compute_diff(&self, e: &FileEntry) -> String {
+    /// Diff for the focused file, scoped to the active tree: the staged tree shows
+    /// the index diff (`git diff --cached`), the unstaged tree the working-tree diff.
+    fn compute_diff(&self, e: &FileEntry, side: Side) -> String {
         use crate::git::Stage;
         if e.index == Stage::Untracked {
             return git::diff_untracked(&e.path).unwrap_or_else(|err| format!("error: {}", err));
+        }
+        if side == Side::Staged {
+            if e.index != Stage::Unmodified {
+                return git::diff_cached(&e.path).unwrap_or_else(|err| format!("error: {}", err));
+            }
+            return String::new();
         }
         if e.worktree != Stage::Unmodified {
             match git::diff_worktree(&e.path) {
@@ -484,7 +602,9 @@ impl App {
         self.tab = new_tab;
         match new_tab {
             Tab::Status => {
-                self.cursor = 0;
+                self.unstaged_cursor = 0;
+                self.staged_cursor = 0;
+                self.status_pane = StatusPane::Unstaged;
                 self.diff_view = DiffView::Hidden;
                 self.focus = Focus::Files;
                 self.rebuild_rows();
@@ -925,41 +1045,28 @@ impl App {
     }
 
     fn current(&self) -> Option<&Row> {
-        self.rows.get(self.cursor)
+        self.active_rows().get(self.active_cursor())
     }
 
     fn handle_files(&mut self, key: KeyEvent) -> Result<()> {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) => self.quit = true,
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                if self.cursor > 0 {
-                    self.cursor -= 1;
-                    self.refresh_diff();
-                }
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                if self.cursor + 1 < self.rows.len() {
-                    self.cursor += 1;
-                    self.refresh_diff();
-                }
-            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.cursor_up(),
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.cursor_down(),
             (KeyCode::Home, _) => {
-                if !self.rows.is_empty() {
-                    self.cursor = 0;
+                if !self.active_rows().is_empty() {
+                    self.set_active_cursor(0);
                     self.refresh_diff();
                 }
             }
             (KeyCode::End, _) => {
-                if !self.rows.is_empty() {
-                    self.cursor = self.rows.len() - 1;
+                let last = self.active_rows().len();
+                if last > 0 {
+                    self.set_active_cursor(last - 1);
                     self.refresh_diff();
                 }
             }
-            (KeyCode::Tab, _) => {
-                if !self.rows.is_empty() {
-                    self.open_diff();
-                }
-            }
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => self.toggle_status_pane(),
             (KeyCode::Right, _) | (KeyCode::Char('l'), _) => self.right_action(),
             (KeyCode::Left, _) | (KeyCode::Char('h'), _) => self.left_action(),
             (KeyCode::Char(' '), _) => self.enter_action(),
@@ -996,11 +1103,50 @@ impl App {
         });
     }
 
+    fn cursor_up(&mut self) {
+        let cur = self.active_cursor();
+        if cur > 0 {
+            self.set_active_cursor(cur - 1);
+            self.refresh_diff();
+        } else if self.status_pane == StatusPane::Staged && !self.unstaged_rows.is_empty() {
+            // Crossing the boundary upward lands on the bottom of the unstaged tree.
+            self.status_pane = StatusPane::Unstaged;
+            self.unstaged_cursor = self.unstaged_rows.len() - 1;
+            self.refresh_diff();
+        }
+    }
+
+    fn cursor_down(&mut self) {
+        let cur = self.active_cursor();
+        let len = self.active_rows().len();
+        if cur + 1 < len {
+            self.set_active_cursor(cur + 1);
+            self.refresh_diff();
+        } else if self.status_pane == StatusPane::Unstaged && !self.staged_rows.is_empty() {
+            // Crossing the boundary downward lands on the top of the staged tree.
+            self.status_pane = StatusPane::Staged;
+            self.staged_cursor = 0;
+            self.refresh_diff();
+        }
+    }
+
+    fn toggle_status_pane(&mut self) {
+        let target = match self.status_pane {
+            StatusPane::Unstaged => StatusPane::Staged,
+            StatusPane::Staged => StatusPane::Unstaged,
+        };
+        if self.rows_for(target).is_empty() {
+            return;
+        }
+        self.status_pane = target;
+        self.refresh_diff();
+    }
+
     fn right_action(&mut self) {
         let Some(r) = self.current() else { return };
         if r.is_dir {
             let p = r.path.clone();
-            self.collapsed.remove(&p);
+            self.active_collapsed().remove(&p);
             self.rebuild_rows();
             self.clamp_cursor();
         } else {
@@ -1028,14 +1174,14 @@ impl App {
         let Some(r) = self.current() else { return };
         if r.is_dir && r.expanded {
             let p = r.path.clone();
-            self.collapsed.insert(p);
+            self.active_collapsed().insert(p);
             self.rebuild_rows();
             self.clamp_cursor();
         } else {
             let parent = parent_path(&r.path);
             if !parent.is_empty() {
-                if let Some(i) = self.rows.iter().position(|x| x.path == parent) {
-                    self.cursor = i;
+                if let Some(i) = self.active_rows().iter().position(|x| x.path == parent) {
+                    self.set_active_cursor(i);
                     self.refresh_diff();
                 }
             }
@@ -1046,10 +1192,11 @@ impl App {
         let Some(r) = self.current() else { return };
         if r.is_dir {
             let p = r.path.clone();
-            if r.expanded {
-                self.collapsed.insert(p);
+            let expanded = r.expanded;
+            if expanded {
+                self.active_collapsed().insert(p);
             } else {
-                self.collapsed.remove(&p);
+                self.active_collapsed().remove(&p);
             }
             self.rebuild_rows();
             self.clamp_cursor();
@@ -1061,10 +1208,12 @@ impl App {
     }
 
     fn clamp_cursor(&mut self) {
-        if self.rows.is_empty() {
-            self.cursor = 0;
-        } else if self.cursor >= self.rows.len() {
-            self.cursor = self.rows.len() - 1;
+        let len = self.active_rows().len();
+        let cur = self.active_cursor();
+        if len == 0 {
+            self.set_active_cursor(0);
+        } else if cur >= len {
+            self.set_active_cursor(len - 1);
         }
         self.refresh_diff();
     }
@@ -1105,32 +1254,42 @@ impl App {
         Ok(())
     }
 
+    /// Enter on the unstaged (top) tree stages the row; on the staged (bottom) tree it unstages.
     fn toggle_stage(&mut self) {
         let Some(r) = self.current().cloned() else { return };
-        if r.agg.has_unstaged_or_untracked() {
-            let path = r.path.clone();
-            let toast_msg = format!("staged {}", path);
-            self.start(format!("staging {}", path), move || {
-                git::stage(&path)?;
-                let snap = gather_status()?;
-                Ok(OpDone {
-                    toast: Some(toast_msg),
-                    status: Some(snap),
-                    ..Default::default()
-                })
-            });
-        } else if r.agg.has_staged() {
-            let path = r.path.clone();
-            let toast_msg = format!("unstaged {}", path);
-            self.start(format!("unstaging {}", path), move || {
-                git::unstage(&path)?;
-                let snap = gather_status()?;
-                Ok(OpDone {
-                    toast: Some(toast_msg),
-                    status: Some(snap),
-                    ..Default::default()
-                })
-            });
+        match self.status_pane {
+            StatusPane::Unstaged => {
+                if !r.agg.has_unstaged_or_untracked() && r.agg.conflict == 0 {
+                    return;
+                }
+                let path = r.path.clone();
+                let toast_msg = format!("staged {}", path);
+                self.start(format!("staging {}", path), move || {
+                    git::stage(&path)?;
+                    let snap = gather_status()?;
+                    Ok(OpDone {
+                        toast: Some(toast_msg),
+                        status: Some(snap),
+                        ..Default::default()
+                    })
+                });
+            }
+            StatusPane::Staged => {
+                if !r.agg.has_staged() {
+                    return;
+                }
+                let path = r.path.clone();
+                let toast_msg = format!("unstaged {}", path);
+                self.start(format!("unstaging {}", path), move || {
+                    git::unstage(&path)?;
+                    let snap = gather_status()?;
+                    Ok(OpDone {
+                        toast: Some(toast_msg),
+                        status: Some(snap),
+                        ..Default::default()
+                    })
+                });
+            }
         }
     }
 
